@@ -1,0 +1,812 @@
+diff --git a/docs/plans/admin/scope-of-work-color.md b/docs/plans/admin/scope-of-work-color.md
+new file mode 100644
+index 0000000..c890f04
+--- /dev/null
++++ b/docs/plans/admin/scope-of-work-color.md
+@@ -0,0 +1,214 @@
++# Implementation Plan: Scope of Work — Color Improvements
++
++**Spec:** `docs/plans/admin/scope-of-work-color.spec.md`
++
++## Contracts
++
++**No API/DTO changes** — the existing `ScopeOfWorkDto` and `ScopeOfWork` entity already have a `Color` field. The backend will silently override the client-sent color for Tasks.
++
++**Service interface** — no new methods. `CreateAsync` and `UpdateAsync` gain internal logic but signatures stay the same.
++
++---
++
++## Step 1 — Backend: Update `ScopeOfWorkService.CreateAsync` for Task color inheritance
++
++**File:** `src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
++
++**What:** When creating a Task (ParentId ≠ "ROOT"), query the parent Trade via `GetByIdAsync` and set `item.Color` to the Trade's Color. If the parent is not found, throw `BusinessValidationException`.
++
++**Details:**
++- After the Level assignment line (`item.Level = ...`), add Task color inheritance:
++  ```csharp
++  if (item.Level == ScopeOfWorkLevel.Task)
++  {
++      var parentTrade = await GetByIdAsync(item.ParentId, cancellationToken)
++          ?? throw new BusinessValidationException($"Parent Trade with Id '{item.ParentId}' not found.");
++      item.Color = parentTrade.Color;
++  }
++  ```
++- Keep the existing default-color fallback (`#FFFFFF`) but restrict it to Trades only — wrap in `else if` or move inside an `item.Level == Trade` check.
++
++---
++
++## Step 2 — Backend: Update `ScopeOfWorkService.UpdateAsync` for cascade and Task override
++
++**File:** `src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
++
++**What:** Two behaviors:
++1. **Task update:** Set `item.Color` to the parent Trade's current color, ignoring the client value.
++2. **Trade update with color change:** After saving the Trade, if `item.Color != existing.Color`, query all child Tasks via `ParentIdIndex` and update each Task's `Color`.
++
++**Details:**
++- After the existing `GetByIdAsync` check and Level assignment, add Task color override:
++  ```csharp
++  if (item.Level == ScopeOfWorkLevel.Task)
++  {
++      var parentTrade = await GetByIdAsync(item.ParentId, cancellationToken)
++          ?? throw new BusinessValidationException($"Parent Trade with Id '{item.ParentId}' not found.");
++      item.Color = parentTrade.Color;
++  }
++  ```
++- Capture `existing.Color` before `SaveAsync(item)`. After saving, add Trade color cascade:
++  ```csharp
++  if (item.Level == ScopeOfWorkLevel.Trade && item.Color != existing.Color)
++  {
++      var childSearch = _dynamoDbContext.QueryAsync<ScopeOfWorkEntity>(
++          item.Id, new QueryConfig { IndexName = "ParentIdIndex" });
++      var children = await childSearch.GetRemainingAsync(cancellationToken);
++      foreach (var child in children)
++      {
++          child.Color = item.Color;
++          await _dynamoDbContext.SaveAsync(child, cancellationToken);
++      }
++  }
++  ```
++
++---
++
++## Step 3 — Backend: Add unit tests for color behavior
++
++**File:** `src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs`
++
++**What:** Add tests in the existing `CreateAsync Tests` and `UpdateAsync Tests` regions.
++
++### CreateAsync Tests to add:
++- `CreateAsync_ForTask_InheritsColorFromParentTrade` — Create a Task with ParentId pointing to a Trade with color `#FF5733`. Assert the returned item's Color is `#FF5733`, regardless of the input color. Use `SetupGetByIdReturns` for the parent Trade.
++- `CreateAsync_ForTask_WhenParentNotFound_ThrowsBusinessValidationException` — Use `SetupGetByIdReturnsNull` for the parent. Assert `BusinessValidationException`.
++
++### UpdateAsync Tests to add:
++- `UpdateAsync_TradeColorChange_CascadesToChildTasks` — Set up a Trade with `#FF0000`, two child Tasks. Update Trade color to `#00FF00`. Mock `ParentIdIndex` query to return the children (same pattern as `DeleteAsync_WhenTrade_DeletesChildrenFirst`). Verify `SaveAsync` was called for each child with the new color.
++- `UpdateAsync_TradeColorUnchanged_DoesNotCascade` — Update Trade with same color. Verify no `ParentIdIndex` query occurs.
++- `UpdateAsync_Task_SetsColorFromParentTrade` — Set up a parent Trade with `#3498DB`. Update a Task sending `#FF0000`. Verify saved Task has `#3498DB`.
++
++---
++
++## Step 4 — Frontend: Add web-safe 216 palette constant
++
++**File:** `src/frontend/src/app/features/scope-of-work/scope-of-work.page.ts`
++
++**What:** Add a `presetColors` property containing the web-safe 216 color palette as a class property.
++
++**Details:**
++```typescript
++readonly webSafePalette: { [key: string]: string[] } = {
++  'custom': [/* all 216 web-safe colors: R,G,B ∈ {00,33,66,99,CC,FF} as #RRGGBB */]
++};
++```
++
++The 216 colors are all combinations of R, G, B where each channel is one of: `00`, `33`, `66`, `99`, `CC`, `FF`.
++
++---
++
++## Step 5 — Frontend: Update template for palette picker, hide Task color, row selection
++
++**File:** `src/frontend/src/app/features/scope-of-work/scope-of-work.page.html`
++
++### 5a. Trades grid — row-only selection
++Change `[selectionSettings]="{ type: 'Single' }"` to `[selectionSettings]="{ type: 'Single', mode: 'Row' }"`.
++
++### 5b. Tasks grid — remove Color column
++Delete the `<e-column headerText="Color" ...>` block (with its `ng-template`) from the tasks `ejs-grid`.
++
++### 5c. Edit dialog — hide color picker for Tasks
++Wrap the color `form-field` div with `@if (editingParentId() === 'ROOT')`.
++
++### 5d. Edit dialog — palette-only color picker
++Update the `ejs-colorpicker` attributes:
++- Add `mode="Palette"`
++- Add `[columns]="18"`
++- Add `[presetColors]="webSafePalette"`
++- Change `[modeSwitcher]="true"` → `[modeSwitcher]="false"`
++
++Result:
++```html
++@if (editingParentId() === 'ROOT') {
++  <div class="form-field">
++    <label class="form-label">Color</label>
++    <input ejs-colorpicker type="color" formControlName="color"
++           mode="Palette" [columns]="18"
++           [presetColors]="webSafePalette"
++           [modeSwitcher]="false" [showButtons]="true" />
++  </div>
++}
++```
++
++---
++
++## Step 6 — Frontend: Expose `editingParentId` for template
++
++**File:** `src/frontend/src/app/features/scope-of-work/scope-of-work.page.ts`
++
++**What:** Change `private readonly editingParentId` to `protected readonly editingParentId` so the template can use it in the `@if` condition.
++
++---
++
++## Step 7 — E2E: Update seed data
++
++**Files:**
++- `src/infra/RenoHouse.Infra/E2eSeeder.cs`
++- `e2e/test-data/seed-contracts.ts`
++
++**What:** Change Task colors to match their parent Trade's color:
++
++| Task | Old Color | New Color | Parent Trade |
++|------|-----------|-----------|-------------|
++| e2e-sow-101 (Install water heater) | `#FFFFFF` | `#FF5733` | Plumbing |
++| e2e-sow-102 (Replace pipes) | `#FFFFFF` | `#FF5733` | Plumbing |
++| e2e-sow-103 (Wire outlets) | `#FFFFFF` | `#3498DB` | Electrical |
++
++Update both files to keep them in sync.
++
++---
++
++## Step 8 — E2E: Update page object column comments
++
++**File:** `e2e/pages/scope-of-work.page.ts`
++
++**What:** Update column index comments in `taskNames()` and `taskFormula()`:
++```
++// Old: Columns: #(0), Acronym(1), Name(2), DurationFormula(3), Color(4), Actions(5)
++// New: Columns: #(0), Acronym(1), Name(2), DurationFormula(3), Actions(4)
++```
++
++No actual index changes — Name (2) and DurationFormula (3) stay at the same positions. Action buttons use `[title]` selectors, not indices.
++
++---
++
++## Step 9 — E2E: Add color-specific E2E tests
++
++**File:** `e2e/tests/scope-of-work.spec.ts`
++
++### Tests to add:
++
++1. **`task edit dialog has no color picker`**
++   - Open edit dialog for seeded Task "Install water heater" under "Plumbing"
++   - Assert no `ejs-colorpicker` / color input is visible in the dialog
++   - Close dialog
++
++2. **`tasks grid has no Color column`**
++   - Navigate to SoW page, select "Plumbing" Trade
++   - Assert the tasks grid header row does not contain "Color" text
++
++3. **`new task inherits trade color via API`**
++   - Create a Trade with a known color, create a Task under it
++   - Fetch all ScopeOfWork items via GET `/api/ScopeOfWork`
++   - Assert the Task's color matches the Trade's color
++
++4. **`trade color change cascades to tasks via API`**
++   - Use a seeded Trade, update its color via PUT `/api/ScopeOfWork`
++   - Fetch all items, verify child Tasks have the new color
++   - (Restore original color afterward to avoid test pollution)
++
++Tests 3 and 4 verify backend behavior via API since Task color is not visible in the Tasks grid UI. Use the `apiToken` fixture from `e2e/fixtures/api.fixture.ts` for direct API calls.
++
++---
++
++## Execution Order
++
++| # | Layer | Steps | Notes |
++|---|-------|-------|-------|
++| 1 | Backend | Steps 1–3 | Service logic + tests |
++| 2 | Frontend | Steps 4–6 | Palette, template, visibility |
++| 3 | E2E | Steps 7–9 | Seed data, page object, tests |
++
++Each layer can be implemented and verified independently. Run `dotnet test` after backend steps, `npm test` after frontend steps.
+diff --git a/docs/plans/admin/scope-of-work-color.spec.md b/docs/plans/admin/scope-of-work-color.spec.md
+new file mode 100644
+index 0000000..6375092
+--- /dev/null
++++ b/docs/plans/admin/scope-of-work-color.spec.md
+@@ -0,0 +1,60 @@
++# Scope of Work — Color Improvements
++
++## Goal
++Simplify color management in the Scope of Work admin page by making Task colors automatically inherit from their parent Trade. Replace the freeform color picker with a palette-only picker using the standard web-safe 216 colors, and improve grid UX by enforcing row-level selection.
++
++## Scope
++
++| Layer | Changes |
++|-------|---------|
++| **Backend** | Auto-set Task color on create; cascade Trade color to child Tasks on update |
++| **Frontend** | Remove color column/picker from Tasks; replace color picker with palette mode; set row-only grid selection |
++| **E2E** | Update seed data; update test assertions for color behavior |
++| **Infrastructure** | None |
++
++## Requirements
++
++1. **Backend — Task color on create:** When `CreateAsync` is called for a Task (ParentId ≠ "ROOT"), the service must query the parent Trade and set the Task's `Color` to the Trade's `Color`, ignoring any color value sent by the client.
++
++2. **Backend — Cascade color on Trade update:** When `UpdateAsync` is called for a Trade (ParentId = "ROOT") and the color has changed compared to the existing record, the service must query all child Tasks via `ParentIdIndex` and update each Task's `Color` to the new Trade color.
++
++3. **Backend — Task color on update (ignore client value):** When `UpdateAsync` is called for a Task, the service must set `Color` to the parent Trade's current color, ignoring any color value sent by the client. This ensures lazy correction of legacy data.
++
++4. **Frontend — Remove color from Tasks grid:** Remove the "Color" column from the Tasks `ejs-grid`.
++
++5. **Frontend — Remove color picker from Task edit dialog:** When the edit dialog is opened for a Task (parentId ≠ "ROOT"), hide the color form field. The `color` form control can still exist but should not be visible or editable for Tasks.
++
++6. **Frontend — Palette-only color picker for Trades:** Replace the current `ejs-colorpicker` with palette mode using the standard web-safe 216 color palette. Disable the mode switcher (`[modeSwitcher]="false"`), so users can only pick from the palette — no freeform input.
++
++7. **Frontend — Row-only selection on Trades grid:** Set `selectionSettings` on the Trades grid to `{ type: 'Single', mode: 'Row' }` to prevent cell-level selection highlighting. (The Tasks grid can remain as-is since clicking a task row opens the edit dialog.)
++
++8. **E2E seed data:** Update `seed-contracts.ts` and `E2eSeeder.cs` so seeded Tasks carry their parent Trade's color instead of `#FFFFFF`. Specifically: Plumbing tasks get `#FF5733`, Electrical tasks get `#3498DB`.
++
++9. **Backend unit tests:** Add tests for: (a) Task creation inherits Trade color, (b) Trade color update cascades to child Tasks, (c) Task update gets Trade color regardless of client value.
++
++## Use Cases (E2E Scenarios)
++
++- **As an admin, when I create a new Trade with a color, then the color swatch appears in the Trades grid.**
++- **As an admin, when I create a new Task under a Trade, then the Task inherits the Trade's color (visible via API response, not in the Tasks grid UI).**
++- **As an admin, when I edit a Trade and change its color, then all child Tasks receive the updated color (verifiable via API GET).**
++- **As an admin, when I edit a Task, I do not see a color picker in the dialog.**
++- **As an admin, when I view the Tasks grid, there is no Color column.**
++- **As an admin, when I click a Trades grid row, the entire row is selected (no individual cell highlighting).**
++
++## Constraints
++
++- No one-time data migration. Existing Tasks with stale colors will be corrected lazily when their parent Trade is updated or when the Task itself is updated.
++- The web-safe 216 color palette is the fixed set — no custom additions.
++- No changes to the ScopeOfWork DynamoDB schema — the `Color` field already exists on all items.
++- No changes to the DTO or API contract — `Color` still flows in both directions; the backend simply overrides the client value for Tasks.
++
++## Assumptions
++
++- The standard web-safe 216 color palette (6×6×6 RGB cube: `#000000` to `#FFFFFF` in `00/33/66/99/CC/FF` steps) is appropriate for this use case.
++- Syncfusion's `ColorPicker` in `mode="Palette"` with `presetColors` supports the 216-color grid natively.
++- The cascade update on Trade color change is acceptable as a synchronous operation within the same request, since the number of Tasks per Trade is small (typically < 20).
++- Row-only selection is only needed on the Trades grid; the Tasks grid behavior (click-to-edit) remains unchanged.
++
++## Open Questions
++
++None — all questions resolved during clarification.
+diff --git a/e2e/pages/scope-of-work.page.ts b/e2e/pages/scope-of-work.page.ts
+index 5f92645..04941a9 100644
+--- a/e2e/pages/scope-of-work.page.ts
++++ b/e2e/pages/scope-of-work.page.ts
+@@ -131,7 +131,7 @@ export class ScopeOfWorkPage {
+     const count = await rows.count();
+     const names: string[] = [];
+     for (let i = 0; i < count; i++) {
+-      // Columns: #(0), Acronym(1), Name(2), DurationFormula(3), Color(4), Actions(5)
++      // Columns: #(0), Acronym(1), Name(2), DurationFormula(3), Actions(4)
+       const text = await rows.nth(i).locator('td').nth(2).textContent();
+       if (text) names.push(text.trim());
+     }
+diff --git a/e2e/test-data/seed-contracts.ts b/e2e/test-data/seed-contracts.ts
+index df1795f..2d9ef15 100644
+--- a/e2e/test-data/seed-contracts.ts
++++ b/e2e/test-data/seed-contracts.ts
+@@ -111,9 +111,9 @@ export const SEED = {
+       { id: 'e2e-sow-002', name: 'Electrical', acronym: 'ELC', orderNumber: 2, color: '#3498DB' },
+     ] as SeedScopeOfWorkTrade[],
+     tasks: [
+-      { id: 'e2e-sow-101', parentId: 'e2e-sow-001', name: 'Install water heater', acronym: 'IWH', orderNumber: 1, color: '#FFFFFF', durationFormula: 'ParentValue + RC', usedParameters: ['a1b2c3d4-0003-0000-0000-000000000003'] },
+-      { id: 'e2e-sow-102', parentId: 'e2e-sow-001', name: 'Replace pipes', acronym: 'RPP', orderNumber: 2, color: '#FFFFFF' },
+-      { id: 'e2e-sow-103', parentId: 'e2e-sow-002', name: 'Wire outlets', acronym: 'WRO', orderNumber: 1, color: '#FFFFFF' },
++      { id: 'e2e-sow-101', parentId: 'e2e-sow-001', name: 'Install water heater', acronym: 'IWH', orderNumber: 1, color: '#FF5733', durationFormula: 'ParentValue + RC', usedParameters: ['a1b2c3d4-0003-0000-0000-000000000003'] },
++      { id: 'e2e-sow-102', parentId: 'e2e-sow-001', name: 'Replace pipes', acronym: 'RPP', orderNumber: 2, color: '#FF5733' },
++      { id: 'e2e-sow-103', parentId: 'e2e-sow-002', name: 'Wire outlets', acronym: 'WRO', orderNumber: 1, color: '#3498DB' },
+     ] as SeedScopeOfWorkTask[],
+   },
+   // Global data (admin-only, not per-user)
+diff --git a/e2e/tests/scope-of-work-color.spec.ts b/e2e/tests/scope-of-work-color.spec.ts
+new file mode 100644
+index 0000000..1fa0982
+--- /dev/null
++++ b/e2e/tests/scope-of-work-color.spec.ts
+@@ -0,0 +1,145 @@
++import { test, expect } from '../fixtures/api.fixture';
++
++const baseUrl = process.env.E2E_BASE_URL || 'https://e2e.reno.house';
++
++interface ScopeOfWorkDto {
++  id: string;
++  parentId: string;
++  name: string;
++  acronym: string;
++  level: string;
++  orderNumber: number;
++  color: string;
++}
++
++test.describe('Scope of Work color inheritance (API)', () => {
++  // Only run for primary user (Alice = admin)
++  test.beforeEach(({ testUser }, testInfo) => {
++    if (testUser === 'secondary') {
++      testInfo.skip();
++    }
++  });
++
++  test('new task inherits trade color via API', async ({ apiToken }) => {
++    const headers = {
++      Authorization: `Bearer ${apiToken}`,
++      'Content-Type': 'application/json',
++    };
++
++    // Create a trade with a specific color
++    const suffix = Date.now();
++    const tradeResponse = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      method: 'POST',
++      headers,
++      body: JSON.stringify({
++        parentId: 'ROOT',
++        name: `ColorTest-${suffix}`,
++        acronym: 'CT',
++        orderNumber: 100,
++        color: '#CC6600',
++      }),
++    });
++    expect(tradeResponse.status).toBe(201);
++    const trade: ScopeOfWorkDto = await tradeResponse.json();
++
++    // Create a task under that trade (send a different color — should be overridden)
++    const taskResponse = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      method: 'POST',
++      headers,
++      body: JSON.stringify({
++        parentId: trade.id,
++        name: `ColorTask-${suffix}`,
++        acronym: 'CK',
++        orderNumber: 1,
++        color: '#000000',
++      }),
++    });
++    expect(taskResponse.status).toBe(201);
++    const task: ScopeOfWorkDto = await taskResponse.json();
++
++    // Task should have the trade's color, not the one we sent
++    expect(task.color).toBe('#CC6600');
++
++    // Cleanup
++    await fetch(`${baseUrl}/api/ScopeOfWork/${trade.id}`, {
++      method: 'DELETE',
++      headers,
++    });
++  });
++
++  test('trade color change cascades to tasks via API', async ({ apiToken }) => {
++    const headers = {
++      Authorization: `Bearer ${apiToken}`,
++      'Content-Type': 'application/json',
++    };
++
++    // Create a trade
++    const suffix = Date.now();
++    const tradeResponse = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      method: 'POST',
++      headers,
++      body: JSON.stringify({
++        parentId: 'ROOT',
++        name: `CascadeTest-${suffix}`,
++        acronym: 'CS',
++        orderNumber: 101,
++        color: '#990000',
++      }),
++    });
++    expect(tradeResponse.status).toBe(201);
++    const trade: ScopeOfWorkDto = await tradeResponse.json();
++
++    // Create two tasks under the trade
++    const task1Resp = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      method: 'POST',
++      headers,
++      body: JSON.stringify({
++        parentId: trade.id,
++        name: `CascadeTask1-${suffix}`,
++        acronym: 'C1',
++        orderNumber: 1,
++      }),
++    });
++    const task2Resp = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      method: 'POST',
++      headers,
++      body: JSON.stringify({
++        parentId: trade.id,
++        name: `CascadeTask2-${suffix}`,
++        acronym: 'C2',
++        orderNumber: 2,
++      }),
++    });
++    expect(task1Resp.status).toBe(201);
++    expect(task2Resp.status).toBe(201);
++
++    // Update the trade's color
++    const updateResp = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      method: 'PUT',
++      headers,
++      body: JSON.stringify({
++        ...trade,
++        color: '#009933',
++      }),
++    });
++    expect(updateResp.status).toBe(200);
++
++    // Fetch all items and verify child tasks have the new color
++    const allResp = await fetch(`${baseUrl}/api/ScopeOfWork`, {
++      headers: { Authorization: `Bearer ${apiToken}` },
++    });
++    const allItems: ScopeOfWorkDto[] = await allResp.json();
++    const childTasks = allItems.filter(i => i.parentId === trade.id);
++
++    expect(childTasks).toHaveLength(2);
++    for (const task of childTasks) {
++      expect(task.color).toBe('#009933');
++    }
++
++    // Cleanup
++    await fetch(`${baseUrl}/api/ScopeOfWork/${trade.id}`, {
++      method: 'DELETE',
++      headers,
++    });
++  });
++});
+diff --git a/e2e/tests/scope-of-work.spec.ts b/e2e/tests/scope-of-work.spec.ts
+index 5f5db16..3ccc32b 100644
+--- a/e2e/tests/scope-of-work.spec.ts
++++ b/e2e/tests/scope-of-work.spec.ts
+@@ -343,4 +343,31 @@ test.describe('Scope of Work (admin)', () => {
+     const formula = await sow.tradeFormula(tradeName);
+     expect(formula).toBe('FA + CH');
+   });
++
++  // ── Color improvement tests ───────────────────────────────────────
++
++  test('task edit dialog has no color picker', async ({ authenticatedPage }) => {
++    const sow = new ScopeOfWorkPage(authenticatedPage);
++    await sow.goto();
++
++    await sow.openTaskEditDialog('Plumbing', 'Install water heater');
++    const colorPicker = sow.dialog.locator('ejs-colorpicker, input[ejs-colorpicker]');
++    await expect(colorPicker).toHaveCount(0);
++    await sow.closeDialog();
++  });
++
++  test('tasks grid has no Color column', async ({ authenticatedPage }) => {
++    const sow = new ScopeOfWorkPage(authenticatedPage);
++    await sow.goto();
++
++    await sow.selectTrade('Plumbing');
++    const headers = sow.tasksGrid.locator('.e-headercell');
++    const count = await headers.count();
++    const headerTexts: string[] = [];
++    for (let i = 0; i < count; i++) {
++      const text = await headers.nth(i).textContent();
++      headerTexts.push(text?.trim() ?? '');
++    }
++    expect(headerTexts).not.toContain('Color');
++  });
+ });
+diff --git a/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs b/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
+index 22b0301..df3acc0 100644
+--- a/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
++++ b/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
+@@ -44,7 +44,13 @@ public sealed class ScopeOfWorkService : IScopeOfWorkService
+ 
+         item.Level = item.ParentId == "ROOT" ? ScopeOfWorkLevel.Trade : ScopeOfWorkLevel.Task;
+ 
+-        if (string.IsNullOrEmpty(item.Color))
++        if (item.Level == ScopeOfWorkLevel.Task)
++        {
++            var parentTrade = await GetByIdAsync(item.ParentId, cancellationToken)
++                ?? throw new BusinessValidationException($"Parent Trade with Id '{item.ParentId}' not found.");
++            item.Color = parentTrade.Color;
++        }
++        else if (string.IsNullOrEmpty(item.Color))
+         {
+             item.Color = "#FFFFFF";
+         }
+@@ -66,6 +72,27 @@ public sealed class ScopeOfWorkService : IScopeOfWorkService
+ 
+         item.Level = item.ParentId == "ROOT" ? ScopeOfWorkLevel.Trade : ScopeOfWorkLevel.Task;
+ 
++        if (item.Level == ScopeOfWorkLevel.Task)
++        {
++            var parentTrade = await GetByIdAsync(item.ParentId, cancellationToken)
++                ?? throw new BusinessValidationException($"Parent Trade with Id '{item.ParentId}' not found.");
++            item.Color = parentTrade.Color;
++        }
++
++        var colorChanged = item.Level == ScopeOfWorkLevel.Trade && item.Color != existing.Color;
++
++        if (colorChanged)
++        {
++            var childSearch = _dynamoDbContext.QueryAsync<ScopeOfWorkEntity>(
++                item.Id, new QueryConfig { IndexName = "ParentIdIndex" });
++            var children = await childSearch.GetRemainingAsync(cancellationToken);
++            foreach (var child in children)
++            {
++                child.Color = item.Color;
++                await _dynamoDbContext.SaveAsync(child, cancellationToken);
++            }
++        }
++
+         await _dynamoDbContext.SaveAsync(item, cancellationToken);
+         return item;
+     }
+diff --git a/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs b/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
+index 4ebe596..56de394 100644
+--- a/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
++++ b/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
+@@ -118,6 +118,9 @@ public class ScopeOfWorkServiceTests
+     [Test]
+     public async Task CreateAsync_SetsLevel_ForTask()
+     {
++        var parentTrade = CreateItem("trade-1", "ROOT", "Plumbing", color: "#FF5733");
++        SetupGetByIdReturns(parentTrade);
++
+         var item = CreateItem(id: "", parentId: "trade-1", name: "Install pipes");
+ 
+         var result = await _sut.CreateAsync(item);
+@@ -125,6 +128,30 @@ public class ScopeOfWorkServiceTests
+         Assert.That(result.Level, Is.EqualTo(ScopeOfWorkLevel.Task));
+     }
+ 
++    [Test]
++    public async Task CreateAsync_ForTask_InheritsColorFromParentTrade()
++    {
++        var parentTrade = CreateItem("trade-1", "ROOT", "Plumbing", color: "#FF5733");
++        SetupGetByIdReturns(parentTrade);
++
++        var item = CreateItem(id: "", parentId: "trade-1", name: "Install pipes", color: "#000000");
++
++        var result = await _sut.CreateAsync(item);
++
++        Assert.That(result.Color, Is.EqualTo("#FF5733"));
++    }
++
++    [Test]
++    public void CreateAsync_ForTask_WhenParentNotFound_ThrowsBusinessValidationException()
++    {
++        SetupGetByIdReturnsNull("missing-trade");
++
++        var item = CreateItem(id: "", parentId: "missing-trade", name: "Orphan task");
++
++        Assert.That(async () => await _sut.CreateAsync(item),
++            Throws.InstanceOf<BusinessValidationException>());
++    }
++
+     [Test]
+     public async Task CreateAsync_SetsDefaultColor_WhenEmpty()
+     {
+@@ -187,6 +214,79 @@ public class ScopeOfWorkServiceTests
+         Assert.That(async () => await _sut.UpdateAsync(null!), Throws.InstanceOf<ArgumentNullException>());
+     }
+ 
++    [Test]
++    public async Task UpdateAsync_TradeColorChange_CascadesToChildTasks()
++    {
++        var existingTrade = CreateItem("trade-1", "ROOT", "Plumbing", color: "#FF0000");
++        SetupGetByIdReturns(existingTrade);
++
++        var child1 = CreateItem("task-1", "trade-1", "Task A", level: ScopeOfWorkLevel.Task, color: "#FF0000");
++        var child2 = CreateItem("task-2", "trade-1", "Task B", level: ScopeOfWorkLevel.Task, color: "#FF0000");
++
++        var mockChildSearch = new Mock<AsyncSearch<DataLayer.ScopeOfWork.ScopeOfWork>>();
++        mockChildSearch.Setup(x => x.GetRemainingAsync(It.IsAny<CancellationToken>()))
++            .ReturnsAsync([child1, child2]);
++        _mockContext.Setup(x => x.QueryAsync<DataLayer.ScopeOfWork.ScopeOfWork>(
++                "trade-1", It.Is<QueryConfig>(c => c.IndexName == "ParentIdIndex")))
++            .Returns(mockChildSearch.Object);
++
++        var updatedTrade = CreateItem("trade-1", "ROOT", "Plumbing", color: "#00FF00");
++        await _sut.UpdateAsync(updatedTrade);
++
++        Assert.That(child1.Color, Is.EqualTo("#00FF00"));
++        Assert.That(child2.Color, Is.EqualTo("#00FF00"));
++        _mockContext.Verify(x => x.SaveAsync(child1, It.IsAny<CancellationToken>()), Times.Once);
++        _mockContext.Verify(x => x.SaveAsync(child2, It.IsAny<CancellationToken>()), Times.Once);
++    }
++
++    [Test]
++    public async Task UpdateAsync_TradeColorUnchanged_DoesNotCascade()
++    {
++        var existingTrade = CreateItem("trade-1", "ROOT", "Plumbing", color: "#FF0000");
++        SetupGetByIdReturns(existingTrade);
++
++        var updatedTrade = CreateItem("trade-1", "ROOT", "Plumbing Renamed", color: "#FF0000");
++        await _sut.UpdateAsync(updatedTrade);
++
++        _mockContext.Verify(x => x.QueryAsync<DataLayer.ScopeOfWork.ScopeOfWork>(
++            It.IsAny<object>(), It.Is<QueryConfig>(c => c.IndexName == "ParentIdIndex")),
++            Times.Never);
++    }
++
++    [Test]
++    public async Task UpdateAsync_Task_SetsColorFromParentTrade()
++    {
++        var parentTrade = CreateItem("trade-1", "ROOT", "Plumbing", color: "#3498DB");
++        var existingTask = CreateItem("task-1", "trade-1", "Install pipes", level: ScopeOfWorkLevel.Task, color: "#FFFFFF");
++
++        SetupGetByIdReturns(existingTask);
++        // Also set up parent Trade lookup — GetByIdAsync for "trade-1"
++        var mockParentSearch = new Mock<AsyncSearch<DataLayer.ScopeOfWork.ScopeOfWork>>();
++        mockParentSearch.Setup(x => x.GetRemainingAsync(It.IsAny<CancellationToken>()))
++            .ReturnsAsync([parentTrade]);
++        _mockContext.Setup(x => x.QueryAsync<DataLayer.ScopeOfWork.ScopeOfWork>(
++                "trade-1", It.IsAny<QueryConfig>()))
++            .Returns(mockParentSearch.Object);
++
++        var updatedTask = CreateItem("task-1", "trade-1", "Install pipes updated", level: ScopeOfWorkLevel.Task, color: "#FF0000");
++        var result = await _sut.UpdateAsync(updatedTask);
++
++        Assert.That(result.Color, Is.EqualTo("#3498DB"));
++    }
++
++    [Test]
++    public void UpdateAsync_ForTask_WhenParentNotFound_ThrowsBusinessValidationException()
++    {
++        var existingTask = CreateItem("task-1", "missing-trade", "Orphan", level: ScopeOfWorkLevel.Task);
++        SetupGetByIdReturns(existingTask);
++        SetupGetByIdReturnsNull("missing-trade");
++
++        var updatedTask = CreateItem("task-1", "missing-trade", "Orphan Updated", level: ScopeOfWorkLevel.Task);
++
++        Assert.That(async () => await _sut.UpdateAsync(updatedTask),
++            Throws.InstanceOf<BusinessValidationException>());
++    }
++
+     #endregion
+ 
+     #region DeleteAsync Tests
+diff --git a/src/frontend/src/app/features/scope-of-work/scope-of-work.page.html b/src/frontend/src/app/features/scope-of-work/scope-of-work.page.html
+index afd7846..8e2fb70 100644
+--- a/src/frontend/src/app/features/scope-of-work/scope-of-work.page.html
++++ b/src/frontend/src/app/features/scope-of-work/scope-of-work.page.html
+@@ -28,7 +28,7 @@
+           [dataSource]="trades()"
+           gridLines="Horizontal"
+           [enableHover]="true"
+-          [selectionSettings]="{ type: 'Single' }"
++          [selectionSettings]="{ type: 'Single', mode: 'Row' }"
+           (recordClick)="onTradeRowClick($event)"
+           width="100%"
+           cssClass="rh-clickable-grid"
+@@ -85,11 +85,6 @@
+               <e-column field="acronym" headerText="Acronym" width="120"></e-column>
+               <e-column field="name" headerText="Name"></e-column>
+               <e-column field="durationFormula" headerText="Duration Formula"></e-column>
+-              <e-column headerText="Color" width="80" textAlign="Center">
+-                <ng-template #template let-data>
+-                  <span class="sow-color-swatch" [style.background-color]="data.color"></span>
+-                </ng-template>
+-              </e-column>
+               <e-column headerText="" width="100" textAlign="Center">
+                 <ng-template #template let-data>
+                   <div class="action-buttons">
+@@ -135,10 +130,15 @@
+           <span class="form-error">This order number is already in use</span>
+         }
+       </div>
+-      <div class="form-field">
+-        <label class="form-label">Color</label>
+-        <input ejs-colorpicker type="color" formControlName="color" [modeSwitcher]="true" [showButtons]="true" />
+-      </div>
++      @if (editingParentId() === 'ROOT') {
++        <div class="form-field">
++          <label class="form-label">Color</label>
++          <input ejs-colorpicker type="color" formControlName="color"
++                 mode="Palette" [columns]="18"
++                 [presetColors]="webSafePalette"
++                 [modeSwitcher]="false" [showButtons]="true" />
++        </div>
++      }
+     </form>
+   </ng-template>
+   <ng-template #footerTemplate>
+diff --git a/src/frontend/src/app/features/scope-of-work/scope-of-work.page.ts b/src/frontend/src/app/features/scope-of-work/scope-of-work.page.ts
+index 6f3e7f7..62e6186 100644
+--- a/src/frontend/src/app/features/scope-of-work/scope-of-work.page.ts
++++ b/src/frontend/src/app/features/scope-of-work/scope-of-work.page.ts
+@@ -73,7 +73,7 @@ export class ScopeOfWorkPage {
+ 
+   readonly isEditMode = signal(false);
+   private readonly editingId = signal('');
+-  private readonly editingParentId = signal('ROOT');
++  protected readonly editingParentId = signal('ROOT');
+ 
+   readonly dialogHeader = computed(() => {
+     if (this.isEditMode()) return 'Edit Item';
+@@ -87,6 +87,47 @@ export class ScopeOfWorkPage {
+     return item.usedParameters.map(id => lookup.get(id) ?? id).join(', ');
+   });
+ 
++  readonly webSafePalette: { [key: string]: string[] } = {
++    'custom': [
++      '#000000', '#000033', '#000066', '#000099', '#0000CC', '#0000FF',
++      '#003300', '#003333', '#003366', '#003399', '#0033CC', '#0033FF',
++      '#006600', '#006633', '#006666', '#006699', '#0066CC', '#0066FF',
++      '#009900', '#009933', '#009966', '#009999', '#0099CC', '#0099FF',
++      '#00CC00', '#00CC33', '#00CC66', '#00CC99', '#00CCCC', '#00CCFF',
++      '#00FF00', '#00FF33', '#00FF66', '#00FF99', '#00FFCC', '#00FFFF',
++      '#330000', '#330033', '#330066', '#330099', '#3300CC', '#3300FF',
++      '#333300', '#333333', '#333366', '#333399', '#3333CC', '#3333FF',
++      '#336600', '#336633', '#336666', '#336699', '#3366CC', '#3366FF',
++      '#339900', '#339933', '#339966', '#339999', '#3399CC', '#3399FF',
++      '#33CC00', '#33CC33', '#33CC66', '#33CC99', '#33CCCC', '#33CCFF',
++      '#33FF00', '#33FF33', '#33FF66', '#33FF99', '#33FFCC', '#33FFFF',
++      '#660000', '#660033', '#660066', '#660099', '#6600CC', '#6600FF',
++      '#663300', '#663333', '#663366', '#663399', '#6633CC', '#6633FF',
++      '#666600', '#666633', '#666666', '#666699', '#6666CC', '#6666FF',
++      '#669900', '#669933', '#669966', '#669999', '#6699CC', '#6699FF',
++      '#66CC00', '#66CC33', '#66CC66', '#66CC99', '#66CCCC', '#66CCFF',
++      '#66FF00', '#66FF33', '#66FF66', '#66FF99', '#66FFCC', '#66FFFF',
++      '#990000', '#990033', '#990066', '#990099', '#9900CC', '#9900FF',
++      '#993300', '#993333', '#993366', '#993399', '#9933CC', '#9933FF',
++      '#996600', '#996633', '#996666', '#996699', '#9966CC', '#9966FF',
++      '#999900', '#999933', '#999966', '#999999', '#9999CC', '#9999FF',
++      '#99CC00', '#99CC33', '#99CC66', '#99CC99', '#99CCCC', '#99CCFF',
++      '#99FF00', '#99FF33', '#99FF66', '#99FF99', '#99FFCC', '#99FFFF',
++      '#CC0000', '#CC0033', '#CC0066', '#CC0099', '#CC00CC', '#CC00FF',
++      '#CC3300', '#CC3333', '#CC3366', '#CC3399', '#CC33CC', '#CC33FF',
++      '#CC6600', '#CC6633', '#CC6666', '#CC6699', '#CC66CC', '#CC66FF',
++      '#CC9900', '#CC9933', '#CC9966', '#CC9999', '#CC99CC', '#CC99FF',
++      '#CCCC00', '#CCCC33', '#CCCC66', '#CCCC99', '#CCCCCC', '#CCCCFF',
++      '#CCFF00', '#CCFF33', '#CCFF66', '#CCFF99', '#CCFFCC', '#CCFFFF',
++      '#FF0000', '#FF0033', '#FF0066', '#FF0099', '#FF00CC', '#FF00FF',
++      '#FF3300', '#FF3333', '#FF3366', '#FF3399', '#FF33CC', '#FF33FF',
++      '#FF6600', '#FF6633', '#FF6666', '#FF6699', '#FF66CC', '#FF66FF',
++      '#FF9900', '#FF9933', '#FF9966', '#FF9999', '#FF99CC', '#FF99FF',
++      '#FFCC00', '#FFCC33', '#FFCC66', '#FFCC99', '#FFCCCC', '#FFCCFF',
++      '#FFFF00', '#FFFF33', '#FFFF66', '#FFFF99', '#FFFFCC', '#FFFFFF',
++    ],
++  };
++
+   readonly form = new FormGroup({
+     name: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
+     acronym: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
+diff --git a/src/infra/RenoHouse.Infra/E2eSeeder.cs b/src/infra/RenoHouse.Infra/E2eSeeder.cs
+index 28e54f5..3414ce0 100644
+--- a/src/infra/RenoHouse.Infra/E2eSeeder.cs
++++ b/src/infra/RenoHouse.Infra/E2eSeeder.cs
+@@ -485,7 +485,7 @@ public static class E2eSeeder
+             ["Acronym"] = "IWH",
+             ["Level"] = "Task",
+             ["OrderNumber"] = 1,
+-            ["Color"] = "#FFFFFF",
++            ["Color"] = "#FF5733",
+             ["DurationFormula"] = "ParentValue + RC",
+             ["UsedParameters"] = new DynamoDBList(new List<DynamoDBEntry> { "a1b2c3d4-0003-0000-0000-000000000003" })
+         });
+@@ -498,7 +498,7 @@ public static class E2eSeeder
+             ["Acronym"] = "RPP",
+             ["Level"] = "Task",
+             ["OrderNumber"] = 2,
+-            ["Color"] = "#FFFFFF"
++            ["Color"] = "#FF5733"
+         });
+ 
+         // Task under Electrical
+@@ -510,7 +510,7 @@ public static class E2eSeeder
+             ["Acronym"] = "WRO",
+             ["Level"] = "Task",
+             ["OrderNumber"] = 1,
+-            ["Color"] = "#FFFFFF"
++            ["Color"] = "#3498DB"
+         });
+ 
+         await batchWrite.ExecuteAsync();
