@@ -18,7 +18,7 @@ index 0000000..c890f04
 +
 +## Step 1 — Backend: Update `ScopeOfWorkService.CreateAsync` for Task color inheritance
 +
-+**File:** `src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
++**File:** `src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
 +
 +**What:** When creating a Task (ParentId ≠ "ROOT"), query the parent Trade via `GetByIdAsync` and set `item.Color` to the Trade's Color. If the parent is not found, throw `BusinessValidationException`.
 +
@@ -38,7 +38,7 @@ index 0000000..c890f04
 +
 +## Step 2 — Backend: Update `ScopeOfWorkService.UpdateAsync` for cascade and Task override
 +
-+**File:** `src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
++**File:** `src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
 +
 +**What:** Two behaviors:
 +1. **Task update:** Set `item.Color` to the parent Trade's current color, ignoring the client value.
@@ -73,7 +73,7 @@ index 0000000..c890f04
 +
 +## Step 3 — Backend: Add unit tests for color behavior
 +
-+**File:** `src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs`
++**File:** `src/backend/Project.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs`
 +
 +**What:** Add tests in the existing `CreateAsync Tests` and `UpdateAsync Tests` regions.
 +
@@ -151,7 +151,7 @@ index 0000000..c890f04
 +## Step 7 — E2E: Update seed data
 +
 +**Files:**
-+- `src/infra/RenoHouse.Infra/E2eSeeder.cs`
++- `src/infra/Project.Infra/E2eSeeder.cs`
 +- `e2e/test-data/seed-contracts.ts`
 +
 +**What:** Change Task colors to match their parent Trade's color:
@@ -501,10 +501,10 @@ index 5f5db16..3ccc32b 100644
 +    expect(headerTexts).not.toContain('Color');
 +  });
  });
-diff --git a/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs b/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
+diff --git a/src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs b/src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
 index 22b0301..df3acc0 100644
---- a/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
-+++ b/src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
+--- a/src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
++++ b/src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs
 @@ -44,7 +44,13 @@ public sealed class ScopeOfWorkService : IScopeOfWorkService
  
          item.Level = item.ParentId == "ROOT" ? ScopeOfWorkLevel.Trade : ScopeOfWorkLevel.Task;
@@ -548,10 +548,10 @@ index 22b0301..df3acc0 100644
          await _dynamoDbContext.SaveAsync(item, cancellationToken);
          return item;
      }
-diff --git a/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs b/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
+diff --git a/src/backend/Project.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs b/src/backend/Project.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
 index 4ebe596..56de394 100644
---- a/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
-+++ b/src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
+--- a/src/backend/Project.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
++++ b/src/backend/Project.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs
 @@ -118,6 +118,9 @@ public class ScopeOfWorkServiceTests
      [Test]
      public async Task CreateAsync_SetsLevel_ForTask()
@@ -779,10 +779,10 @@ index 6f3e7f7..62e6186 100644
    readonly form = new FormGroup({
      name: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
      acronym: new FormControl('', { nonNullable: true, validators: [Validators.required] }),
-diff --git a/src/infra/RenoHouse.Infra/E2eSeeder.cs b/src/infra/RenoHouse.Infra/E2eSeeder.cs
+diff --git a/src/infra/Project.Infra/E2eSeeder.cs b/src/infra/Project.Infra/E2eSeeder.cs
 index 28e54f5..3414ce0 100644
---- a/src/infra/RenoHouse.Infra/E2eSeeder.cs
-+++ b/src/infra/RenoHouse.Infra/E2eSeeder.cs
+--- a/src/infra/Project.Infra/E2eSeeder.cs
++++ b/src/infra/Project.Infra/E2eSeeder.cs
 @@ -485,7 +485,7 @@ public static class E2eSeeder
              ["Acronym"] = "IWH",
              ["Level"] = "Task",

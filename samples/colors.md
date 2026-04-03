@@ -12,7 +12,7 @@
 
 ## Step 1 — Backend: Update `ScopeOfWorkService.CreateAsync` for Task color inheritance
 
-**File:** `src/backend/RenoHouse.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
+**File:** `src/backend/Project.BusinessLayer/ScopeOfWork/ScopeOfWorkService.cs`
 
 **What:** When creating a Task (ParentId ≠ "ROOT"), query the parent Trade via `GetByIdAsync` and set `item.Color` to the Trade's Color. If the parent is not found, throw `BusinessValidationException`.
 
@@ -67,7 +67,7 @@
 
 ## Step 3 — Backend: Add unit tests for color behavior
 
-**File:** `src/backend/RenoHouse.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs`
+**File:** `src/backend/Project.Tests/ScopeOfWork/ScopeOfWorkServiceTests.cs`
 
 **What:** Add tests in the existing `CreateAsync Tests` and `UpdateAsync Tests` regions.
 
@@ -145,7 +145,7 @@ Result:
 ## Step 7 — E2E: Update seed data
 
 **Files:**
-- `src/infra/RenoHouse.Infra/E2eSeeder.cs`
+- `src/infra/Project.Infra/E2eSeeder.cs`
 - `e2e/test-data/seed-contracts.ts`
 
 **What:** Change Task colors to match their parent Trade's color:
